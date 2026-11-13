@@ -1,0 +1,19 @@
+{
+  "confirmed": false,
+  "stage": "model_plan",
+  "model": "binary_logistic",
+  "analyses": ["univariable", "multivariable"],
+  "preprocessing_fingerprint": "由阶段4模板填入当前处理清单指纹",
+  "independent_observations": null,
+  "study_design": "",
+  "outcome": "CKD_status",
+  "positive_value": "1",
+  "missing_strategy": "complete_case",
+  "covariates": [
+    {"name": "age_years", "type": "continuous", "reference": null, "unit": "years", "unit_step": 1},
+    {"name": "sex", "type": "binary", "reference": "Female", "unit": "", "unit_step": 1},
+    {"name": "anomaly_type", "type": "categorical", "reference": "Group_A", "unit": "", "unit_step": 1}
+  ],
+  "multivariable_covariates": ["age_years", "sex", "anomaly_type"],
+  "notes": ""
+}

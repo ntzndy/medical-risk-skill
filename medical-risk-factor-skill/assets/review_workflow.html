@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<title>医学研究审核</title>
+<style>
+*{box-sizing:border-box}body{font:14px system-ui,"Microsoft YaHei",sans-serif;margin:0;color:#242e29;background:#fff;letter-spacing:0}
+main{max-width:1440px;margin:auto;padding:24px}header{border-bottom:3px solid #277650;padding-bottom:16px}
+h1{font-size:23px;margin:0 0 12px}h2{font-size:18px;margin:24px 0 12px}p{line-height:1.7}
+.muted{color:#59655e}.scope{overflow-wrap:anywhere}.bar{padding:12px 0;background:#f2f5f2}
+.fields{display:flex;flex-wrap:wrap;gap:16px;padding:16px 0}.field{display:flex;flex-direction:column;gap:7px;max-width:100%;width:320px}
+select,input,textarea,button{font:inherit;max-width:100%}select,input[type=text],textarea{border:1px solid #9da9a0;border-radius:4px;padding:8px;background:#fff;color:inherit}
+textarea{min-height:64px;width:100%;resize:vertical}button{border:1px solid #899a8e;border-radius:4px;padding:8px 12px;background:#fff;color:inherit;cursor:pointer}
+button:hover{background:#eaf1ec}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid #c77a21;outline-offset:2px}
+.primary{background:#236b49;color:#fff}.primary:hover{background:#185438}.group{border-top:1px solid #cbd5ce;margin-top:20px;padding-top:8px}
+.grouphead{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.grouphead h2{margin:8px 0}.commands{display:flex;flex-wrap:wrap;gap:8px}
+.scroll{width:100%;overflow:auto;max-height:520px;margin:12px 0}table{border-collapse:collapse;width:100%;table-layout:fixed;min-width:1000px}
+th,td{border-bottom:1px solid #d8dfd9;padding:10px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+th{background:#edf2ee;position:sticky;top:0;font-weight:600}td label{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;margin-right:10px}
+td textarea{min-height:46px}td select{width:100%}.tag{font-size:12px;color:#215c40}.warning{color:#9b3c22}
+footer{border-top:2px solid #277650;margin-top:24px;padding-top:16px}footer .commands{margin-top:12px}#status{min-height:24px;overflow-wrap:anywhere}
+[hidden]{display:none!important}@media(max-width:600px){main{padding:16px 12px}h1{font-size:21px}.field{width:100%}.commands button{flex:1 1 150px}}
+</style>
+</head>
+<body><main>
+<header><h1 id="title"></h1><div id="stats" role="status" class="muted"></div></header>
+<section id="selection" hidden>
+<div class="fields">
+<label class="field">结局字段<select id="outcome"><option value="">请选择</option></select></label>
+<label class="field">结局阳性值（阶段3确认）<input id="positive" type="text"></label>
+</div>
+<p id="research" class="scope"></p>
+<p class="muted">结局沿用阶段1的用户反馈；更改目标须返回阶段1。结局行选择“不纳入”，不作为自身解释变量。</p>
+<details><summary>辅助核查字段（可选，不进入模型）</summary>
+<div class="fields">
+<label class="field">授权字段<select id="support" multiple size="5" aria-label="辅助核查字段"></select></label>
+<label class="field">核查用途<textarea id="purpose"></textarea></label>
+</div>
+</details>
+<div id="groups"></div>
+</section>
+<section id="quality" hidden>
+<h2>本轮核查范围</h2><p id="scope" class="scope"></p>
+<p class="muted">未选字段未参与核查。下列项目只是待核对线索；审核不会自动修改原始值、填补缺失或删除记录。</p>
+<div class="scroll"><table>
+<colgroup><col style="width:11%"><col style="width:14%"><col style="width:25%"><col style="width:20%"><col style="width:17%"><col style="width:13%"></colgroup>
+<thead><tr><th>编号 / 级别</th><th>字段</th><th>问题 / 影响数</th><th>建议</th><th>处理方式</th><th>理由 / 规则</th></tr></thead>
+<tbody id="issues"></tbody></table></div>
+<p id="noissues" hidden>本轮规则未发现异常，不能证明数据完全无误。</p>
+</section>
+<footer>
+<label class="field">审核备注<textarea id="notes"></textarea></label>
+<div class="commands"><button id="draft" type="button">导出草稿</button><button id="confirm" type="button" class="primary">确认并导出</button></div>
+<p id="status" role="status" class="warning"></p>
+</footer>
+</main>
+<script>
+const data=__REVIEW_DATA__;
+const decision=data.decision,isSelection=decision.stage==='variable_selection';
+const variables=data.variables||decision.variables;
+const issues=data.issues||decision.issues;
+const findVariable=name=>decision.variables.find(row=>row.variable===name);
+const findIssue=id=>decision.issues.find(row=>row.issue_id===id);
+const $=id=>document.getElementById(id);
+const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const makeOption=(value,label)=>{const option=document.createElement('option');option.value=value;option.textContent=label;return option};
+$('title').textContent=isSelection?'阶段 2/5：确认分析变量':'阶段 3/5：已选变量质量审核';
+document.title=$('title').textContent;
+$(isSelection?'selection':'quality').hidden=false;
+if(isSelection){
+  variables.forEach(r=>{$('outcome').append(makeOption(r.variable,r.variable));$('support').append(makeOption(r.variable,r.variable))});
+  $('outcome').value=decision.outcome||'';
+  $('outcome').disabled=Boolean(data.outcome_locked);
+  $('positive').value=decision.positive_value??'';
+  $('research').textContent=data.research_question||'';
+  const domains=[...new Set(variables.map(r=>r.domain))];
+  domains.forEach(domain=>{
+    const subset=variables.filter(r=>r.domain===domain),section=document.createElement('section');
+    section.className='group';
+    section.innerHTML=`<div class="grouphead"><h2>${esc(domain)} (${subset.length})</h2><div class="commands"><button type="button" class="include">本类全部纳入</button><button type="button" class="exclude">本类全部不纳入</button></div></div><div class="scroll"><table><colgroup><col style="width:17%"><col style="width:18%"><col style="width:12%"><col style="width:23%"><col style="width:18%"><col style="width:12%"></colgroup><thead><tr><th>原始字段</th><th>候选角色</th><th>AI 建议</th><th>建议理由</th><th>解释变量选择</th><th>备注</th></tr></thead><tbody></tbody></table></div>`;
+    const body=section.querySelector('tbody');
+    subset.forEach(r=>{
+      const tr=document.createElement('tr'),index=variables.indexOf(r);
+      tr.innerHTML=`<td>${esc(r.variable)}</td><td>${esc(r.suggested_role)}</td><td class="tag">${esc(r.ai_suggestion)}</td><td>${esc(r.ai_reason)}</td><td><label><input type="radio" name="pick_${index}" value="纳入">纳入</label><label><input type="radio" name="pick_${index}" value="不纳入">不纳入</label></td><td><textarea aria-label="${esc(r.variable)} 的备注"></textarea></td>`;
+      tr.querySelectorAll('input').forEach(input=>input.addEventListener('change',event=>{findVariable(r.variable).user_selection=event.target.value;update()}));
+      tr.querySelector('textarea').addEventListener('input',event=>findVariable(r.variable).user_note=event.target.value);
+      body.append(tr);
+    });
+    ['纳入','不纳入'].forEach((value,index)=>section.querySelector(index===0?'.include':'.exclude').addEventListener('click',()=>{
+      subset.forEach(r=>findVariable(r.variable).user_selection=value);
+      body.querySelectorAll('tr').forEach(tr=>tr.querySelector(`input[value="${value}"]`).checked=true);
+      update();
+    }));
+    $('groups').append(section);
+  });
+}else{
+  $('scope').textContent=`结局：${decision.outcome}；核查字段：${decision.scope_variables.join('、')}`;
+  issues.forEach(r=>{
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td>${esc(r.issue_id)}<br>${esc(r.severity)}</td><td>${esc(r.variable)}</td><td>${esc(r.description)} (${r.affected_n})</td><td>${esc(r.suggestion)}</td><td><select aria-label="问题 ${esc(r.issue_id)} 的处理方法"></select></td><td><textarea aria-label="问题 ${esc(r.issue_id)} 的处理理由"></textarea></td>`;
+    const select=tr.querySelector('select');
+    data.actions.forEach(action=>select.append(makeOption(action,action)));
+    select.addEventListener('change',event=>{findIssue(r.issue_id).user_action=event.target.value;update()});
+    tr.querySelector('textarea').addEventListener('input',event=>findIssue(r.issue_id).user_reason=event.target.value);
+    $('issues').append(tr);
+  });
+  $('noissues').hidden=issues.length!==0;
+}
+function update(){
+  if(isSelection){
+    const pending=decision.variables.filter(r=>!data.options.includes(r.user_selection)).length;
+    $('stats').textContent=`全部字段 ${variables.length}；已选择 ${variables.length-pending}；未选择 ${pending}。等待变量确认，未进行质量核查。`;
+  }else{
+    const pending=decision.issues.filter(r=>r.user_action==='待确认').length;
+    $('stats').textContent=`核查字段 ${decision.scope_variables.length}；待核对线索 ${issues.length}；待处置 ${pending}。`;
+  }
+}
+function exportDecision(strict){
+  const result=JSON.parse(JSON.stringify(decision)),errors=[];
+  result.notes=$('notes').value;
+  if(isSelection){
+    result.outcome=$('outcome').value;
+    result.positive_value=$('positive').value.trim();
+    result.support_variables=[...$('support').selectedOptions].map(option=>option.value);
+    result.support_purpose=$('purpose').value.trim();
+    const included=result.variables.filter(r=>r.user_selection==='纳入').map(r=>r.variable);
+    if(result.variables.some(r=>!data.options.includes(r.user_selection)))errors.push('仍有字段未选择');
+    if(!result.outcome)errors.push('须指定结局字段');
+    if(included.includes(result.outcome))errors.push('结局不能同时作为解释变量');
+    const privateNames=variables.filter(r=>String(r.suggested_type||'').startsWith('identifier')).map(r=>r.variable);
+    if(privateNames.some(name=>included.includes(name)||name===result.outcome))errors.push('身份标识不能作为结局或解释变量');
+    if(result.support_variables.some(name=>included.includes(name)||name===result.outcome))errors.push('辅助核查字段不能重复指定结局或解释变量');
+    if(result.support_variables.length&&!result.support_purpose)errors.push('须填写辅助核查用途');
+    result.status=strict?'confirmed':'draft';
+  }else{
+    if(result.issues.some(r=>!data.actions.slice(1).includes(r.user_action)))errors.push('仍有异常未决定');
+    if(result.issues.some(r=>data.actions.slice(3,7).includes(r.user_action)&&!String(r.user_reason||'').trim()))errors.push('修改或排除必须填写理由及具体规则');
+    result.status=strict?'reviewed':'draft';
+    result.statistical_plan_confirmed=false;
+  }
+  if(strict&&errors.length){$('status').textContent=errors.join('；');return}
+  const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));
+  const anchor=document.createElement('a');anchor.href=url;
+  anchor.download=isSelection?'variable_selection_decisions.json':'clinical_review_decisions.json';
+  anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  $('status').textContent=strict?(isSelection?'阶段2决定已导出；下一步仅核查选定范围。':'阶段3审核已导出；仍须确认并执行数据处理，尚未进入模型确认。'):'已导出草稿，尚未确认。';
+}
+$('draft').addEventListener('click',()=>exportDecision(false));
+$('confirm').addEventListener('click',()=>exportDecision(true));
+document.addEventListener('input',()=>{$('status').textContent=''});
+document.addEventListener('change',()=>{$('status').textContent=''});
+update();
+</script>
+</body></html>
