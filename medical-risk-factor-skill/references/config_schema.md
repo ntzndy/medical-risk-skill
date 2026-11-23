@@ -6,7 +6,7 @@
 
 基础命令 `python scripts/review_workflow.py --input data.xlsx --sheet Sheet1 --outdir output` 仅生成表头摘要和 `research_question.template.json`，不生成变量选择任务或质量报告。必须向用户提问研究目标并等待反馈。
 
-- `schema_version`: `"1.6"`；`stage`: `"research_question"`；`status`: 用户明确反馈后才为 `"confirmed"`。
+- `schema_version`: `"1.7"`；`stage`: `"research_question"`；`status`: 用户明确反馈后才为 `"confirmed"`。
 - `source_sha256`、`sheet`: 模板记录的原始来源指纹和实际工作表；CSV 为 `null`。
 - `research_population`、`research_question`、`outcome_definition`: 用户确认的研究人群、问题、结局定义/时间窗，均非空；时间窗不适用时如实记录。
 - `outcome`: 原始非身份字段，不依据文件名推定。需要派生结局时先单独确认定义与实现，不擅自替换原始结局。
@@ -27,24 +27,33 @@
 
 ## 阶段3：审核、处理、复核
 
-再加 `--selection-decisions output/variable_selection_decisions.json`，生成质量页面、问题 CSV、`missingness_before.csv` 及 `processing_plan.template.json`。缺失表只统计实际空值；`NA`、`null`、`999` 等文字/编码保留原值并作为核查线索，不静默设缺失。
+再加 `--selection-decisions output/variable_selection_decisions.json`，生成质量页面、问题 CSV、`missingness_before.csv` 及 `processing_plan.template.json`。缺失表只统计实际空值，高缺失或全缺失不在其他异常中重复。`NA`、`null`、`999` 等文字/编码保留原值，参加常规类型及极端值核查，不自动识别“疑似缺失码”或静默设缺失。
+
+页面与对话分为 `0% < 缺失比例 < 30%`、`30% ≤ 缺失比例 ≤ 50%`、`> 50%` 三组，0%和无记录另列。每行只显示“变量名 / 缺失比例 / xx%”，数量与结局分布仍保留在审核数据及CSV中。分组由实际数量计算，页面元数据 `missing_groups` 和摘要 `missing_group_counts` 不代表处理授权。低组默认拟采用多重插补，中高组待定；每组列表后仅一个意见框，保存用户整组意见或变量例外。
 
 ### clinical_review_decisions.json
 
 - `schema_version`: `"1.4"`；`stage`: `"data_quality"`；`status`: `"reviewed"`。
+- `review_version`: `"1.7.2"`；旧质量审核须重新生成，阶段1目标及阶段2变量选择的结构版本不变。
 - `source_sha256`、`sheet`、`selection_fingerprint`、`outcome`、`scope_variables`: 从已确认选择生成并锁定。
 - `issues`: 唯一完整覆盖本轮问题；每项 `issue_id`、`rule`、`variable`、`affected_n`、`user_action`、`user_reason`。零异常时 `[]`，仍须确认。
-- `user_action`: 核对原始病历/数据来源、保留并记录、设为缺失（须说明规则）、修正编码/单位（须提供映射）、排除记录（须说明依据）、排除变量（须说明依据）、不适用/无需处理。修改/排除须说明理由；仍为“核对来源”时不得完成阶段3。
+- `user_action`: 选择核对来源、保留、设缺失、修正、排除或无需处理，均须用户意见与理由，修改/排除须具体规则。
+- 不生成 `sentinel_decisions` 或疑似编码计数；旧版带此决定的审核须重新核查，不能静默沿用自动转换规则。用户明确认定某编码表示缺失时，通过确认后的 `operations` 精确处理。
+- `missing_decisions`: 完整覆盖结局及已选解释变量，锁定 `variable`、`role`、`total_n`、`observed_missing_n`、`missing_pct`。用户填 `user_choice`、`user_reason`；可选 `complete_case`、`exclude_variable`、`multiple_imputation`、`recover_source`、`structural_review`；无实际缺失时可用 `no_missing`。非no_missing须理由；结局禁止exclude_variable。缺失数量不把特殊码自动算空。
+- `missing_group_feedback`: 完整覆盖实际存在的三类缺失分组，每项锁定 `group_key`、`label`、`variables`。低/中/高组键分别为 `below_30`、`from_30_to_50`、`above_50`；`user_text` 保存原文，`resolved_text` 初始为空。仅代理据原文整理成逐变量方案、展示并获用户确认后才把已确认原文写入 `resolved_text`。两者不一致时正式审核不能通过，不能忽略文字而沿用默认决定。
+- “提交缺失处理意见”导出 `clinical_review_feedback.json`，`status: "missing_feedback_submitted"`，仅为待整理反馈，不是 `reviewed`；其他异常可尚未决定。低组的预填 `user_choice: "multiple_imputation"` 及默认理由仍为草稿。中高组没有意见且没有已确认逐变量方案时，不能提交空白代替决定。
 - `statistical_plan_confirmed`: 保持 `false`，质量审核不授权模型。
 
 可再加 `--validate-decisions output/clinical_review_decisions.json`，校验并生成 `quality_binding.json`。`valid: true` 只代表决定结构完整，不代表已处理或模型已授权。
 
 ### processing_plan.json
 
-- `schema_version`: `"1.6"`；`stage`: `"preprocessing"`；`status`: 用户确认规则与类型后为 `"confirmed"`。
+- `schema_version`: `"1.7"`；`stage`: `"preprocessing"`；`status`: 用户确认规则与类型后为 `"confirmed"`。
 - `source_sha256`、`sheet`、`selection_fingerprint`: 沿用模板。
 - `quality_fingerprint`: 当前审核 JSON 的规范指纹，取验证输出的 `quality_binding.json`。
-- `missing_strategy`: 仅 `"complete_case"`，逐模型完整案例，不提前按所有选定变量统一删行；不插补。
+- `missing_strategy`: 模板为空，禁止默认替用户选择。当前执行器仅接受明确确认的 `"complete_case"`，且质量决定不能有MI/补录/专项处理待办；逐模型取完整案例，不统一删行。审核可选MI，但当前不执行MI，不能用此字段覆盖用户选择。
+- 缺失决定exclude_variable会真正排除解释变量；其类型项须从variables移除。
+- `postprocessing_missing_decisions`: 若处理后某保留变量的缺失数超过原实际空值数，须复核后逐项填 `variable`、当前 `missing_n`、`user_choice: "complete_case"`、`reason`；未匹配当前数量或未确认时停在阶段3。若选MI等方法，回专项方案，不能填完整案例冒充。此确认不由通用postprocessing_acceptances替代。
 - `strip_whitespace`: 须确认 `true`；类型处理时去首尾空格，空串转缺失。
 - `positive_value`: 处理后结局阳性值，明确指定并与参考组不同。
 - `variables`: 完整且唯一覆盖处理后保留的结局与解释变量；每项 `name`、`type`、`reference`、`unit`、`unit_step`。类型由用户确认，不直接采纳候选；仅 continuous / binary / categorical。结局须 binary；分类参考组须实际存在；连续变量 `unit_step` 为有限正数。排除变量后删除其类型项。
@@ -67,7 +76,7 @@ python scripts/preprocess_data.py --input data.xlsx --research-question output/r
 
 输出 `analysis_data.csv`（仅保留建模字段）、前后缺失表、`processing_log.csv`、`variable_dictionary.csv`、`postprocessing_issues.csv`、确认快照和 `preprocessing_manifest.json`。原始文件不变；记录前后人数与每项处理影响数，不输出标识明细。
 
-新增/加重或修改后仍存的线索会使状态停在 `awaiting_postprocessing_review`。用户复核后应修正规则；确需保留时，在计划中加入 `postprocessing_acceptances: [{"rule": "...", "variable": "...", "reason": "复核后依据"}]` 并重新确认处理。旧审核已明确保留且未加重的线索无需重复询问。只有 `status: completed` 才能进入阶段4。
+新增/加重、具体取值/阈值等证据改变或修改后仍存且未获接受的线索会使状态停在 `awaiting_postprocessing_review`。用户复核后应修正规则；确需保留时，在计划中加入 `postprocessing_acceptances: [{"rule": "...", "variable": "...", "reason": "复核后依据"}]` 并重新确认处理。旧审核已明确保留、证据未变且未加重的线索无需重复询问。新增缺失仍须专门的postprocessing_missing_decisions，不能以通用接受项代替。只有 `status: completed` 才能进入阶段4。
 
 ## 阶段4：config.json
 

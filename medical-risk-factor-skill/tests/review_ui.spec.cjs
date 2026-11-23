@@ -19,9 +19,18 @@ fs.writeFileSync(source, '\ufeff' + csv);
 const run = (...args) => execFileSync(python, ['-X', 'utf8', cli, '--input', source, '--outdir', output, ...args],
   { encoding: 'utf8', timeout: 30000, windowsHide: true });
 run();
+assert.equal(fs.existsSync(path.join(output, 'interactive_review.html')), false);
+const researchPath = path.join(root, 'research_question.json');
+const research = JSON.parse(fs.readFileSync(path.join(output, 'research_question.template.json'), 'utf8'));
+Object.assign(research, { status: 'confirmed', research_population: 'Synthetic independent individuals',
+  research_question: 'Synthetic outcome factors', outcome: '结局', outcome_definition: 'Synthetic binary event' });
+fs.writeFileSync(researchPath, JSON.stringify(research));
+const withResearch = (...args) => run('--research-question', researchPath, ...args);
+withResearch();
 
 (async () => {
-  const browser = await chromium.launch({ channel: 'chrome', headless: true, timeout: 15000, args: ['--disable-gpu'] });
+  const browser = await chromium.launch({ channel: process.env.PLAYWRIGHT_CHANNEL || 'msedge',
+    headless: true, timeout: 15000, args: ['--disable-gpu'] });
   const errors = [], remoteRequests = [];
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true });
@@ -37,7 +46,8 @@ run();
     assert.equal((await page.content()).includes('UNSELECTED_SECRET'), false);
     await page.locator('#confirm').click();
     assert.match(await page.locator('#status').innerText(), /未选择/);
-    await page.locator('#outcome').selectOption('结局');
+    assert.equal(await page.locator('#outcome').inputValue(), '结局');
+    assert.equal(await page.locator('#outcome').isDisabled(), true);
     for (let index = 0; index < 4; index++) {
       await page.locator(`input[name=pick_${index}][value="${index === 0 ? '纳入' : '不纳入'}"]`).check();
     }
@@ -57,7 +67,7 @@ run();
     assert.equal(selection.stage, 'variable_selection');
     assert.equal(selection.variables.length, 4);
     assert.deepEqual(selection.support_variables, []);
-    run('--selection-decisions', selectionPath);
+    withResearch('--selection-decisions', selectionPath);
     await page.goto(pathToFileURL(path.join(output, 'interactive_data_quality.html')).href);
     assert.equal(await page.locator('#quality').isVisible(), true);
     assert.equal(await page.locator('#selection').isVisible(), false);
@@ -73,7 +83,9 @@ run();
     await actions.first().selectOption('设为缺失（须说明规则）');
     await page.locator('#confirm').click();
     assert.match(await page.locator('#status').innerText(), /理由/);
-    await page.locator('#issues textarea').first().fill('合成测试规则；此流程不执行改值');
+    for (const textarea of await page.locator('#issues textarea').all()) {
+      await textarea.fill('合成测试规则；此流程不执行改值');
+    }
     assert.equal(await page.locator('#status').innerText(), '');
     for (const [label, width, height] of [['desktop', 1440, 1000], ['mobile', 390, 844]]) {
       await page.setViewportSize({ width, height });
@@ -88,7 +100,7 @@ run();
     const quality = JSON.parse(fs.readFileSync(qualityPath, 'utf8'));
     assert.equal(quality.status, 'reviewed');
     assert.equal(quality.statistical_plan_confirmed, false);
-    const validation = JSON.parse(run('--selection-decisions', selectionPath, '--validate-decisions', qualityPath));
+    const validation = JSON.parse(withResearch('--selection-decisions', selectionPath, '--validate-decisions', qualityPath));
     assert.equal(validation.valid, true);
     assert.equal(validation.formal_analysis_authorized, false);
     assert.equal(fs.readFileSync(source, 'utf8'), '\ufeff' + csv);
