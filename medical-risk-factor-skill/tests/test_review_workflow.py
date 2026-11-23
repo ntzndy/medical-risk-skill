@@ -95,6 +95,7 @@ class ReviewWorkflowTests(unittest.TestCase):
         quality['status'] = 'reviewed'
         for row in quality['issues']:
             row['user_action'] = '保留并记录'
+            row['user_reason'] = '合成测试保留依据'
         return quality
 
     def test_initial_phase_does_not_scan_or_inspect_values(self):
@@ -244,6 +245,7 @@ class ReviewWorkflowTests(unittest.TestCase):
         for action in workflow.REASON_ACTIONS:
             changed = copy.deepcopy(quality)
             changed['issues'][0]['user_action'] = action
+            changed['issues'][0]['user_reason'] = ''
             self.assertTrue(workflow.validate_quality(changed, template))
             changed['issues'][0]['user_reason'] = '合成测试规则，未实际改值'
             self.assertEqual(workflow.validate_quality(changed, template), [])

@@ -7,20 +7,24 @@ import re
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from profile_data import DATE, PRIVATE, column_profile, inventory, inventory_row, read_table
+from quality_review import (
+    MISSING_OPTIONS, REVIEW_VERSION, details_text, missing_mask, missing_review_groups,
+    mixed_details, review_tables, validate_detailed_review, value_summary,
+)
 
 VERSION = '1.4'
-WORKFLOW_VERSION = '1.6'
+WORKFLOW_VERSION = '1.7'
 RESEARCH_QUESTION = '你想分析哪个疾病或临床事件的危险因素？研究对象是谁，表中哪一列表示这个结局？'
-MISSING_TOKENS = {'', 'na', 'n/a', 'null', 'none', '未知', '未查', '未测', '缺失', '无记录', '-', '--', '999', '9999'}
 SELECTIONS = ['纳入', '不纳入']
 ISSUE_ACTIONS = ['待确认', '核对原始病历/数据来源', '保留并记录', '设为缺失（须说明规则）',
                  '修正编码/单位（须提供映射）', '排除记录（须说明依据）', '排除变量（须说明依据）', '不适用/无需处理']
 REASON_ACTIONS = set(ISSUE_ACTIONS[3:7])
 ISSUE_COLUMNS = ['issue_id', 'rule', 'severity', 'variable', 'affected_n', 'description',
-                 'suggestion', 'user_action', 'user_reason']
+                 'suggestion', 'details', 'user_action', 'user_reason']
 VARIABLE_DECISION_COLUMNS = ['variable', 'user_selection', 'user_note']
 ISSUE_DECISION_COLUMNS = ['issue_id', 'rule', 'variable', 'affected_n', 'user_action', 'user_reason']
 
@@ -185,10 +189,11 @@ def scan(df, support_variables=(), inventory_rows=None):
     """The caller must pass only outcome, confirmed predictors and authorized support."""
     issues = []
 
-    def add(rule, severity, variable, count, description, suggestion):
+    def add(rule, severity, variable, count, description, suggestion, details=None):
         issues.append(dict(issue_id=f'Q{len(issues)+1:04d}', rule=rule, severity=severity,
                            variable=variable, affected_n=int(count), description=description,
-                           suggestion=suggestion, user_action='待确认', user_reason=''))
+                           suggestion=suggestion, details=details_text(details or {}),
+                           user_action='待确认', user_reason=''))
 
     n = len(df)
     if n == 0:
@@ -200,43 +205,52 @@ def scan(df, support_variables=(), inventory_rows=None):
         if inventory_rows is not None:
             inventory_rows.append(inventory_row(key, profile))
         s = profile['text']
-        null = s.isna() | profile['lower'].isin(MISSING_TOKENS).fillna(False)
+        null = missing_mask(s)
         valid = s[~null]
         m = int(null.sum())
-        if m == n and n:
-            add('ALL_MISSING', '需核对', key, n, '整列没有规则认可的有效值', '区分真正缺失、结构性缺失和特殊编码')
-        elif m and n and m / n >= 0.3:
-            add('HIGH_MISSING', '提示', key, m, f'缺失或疑似缺失码占 {m/n:.1%}', '核实编码并在缺失策略阶段讨论，不自动删除')
-        sentinel = profile['lower'].isin(MISSING_TOKENS - {''}).fillna(False)
-        if sentinel.any():
-            add('SENTINEL_VALUE', '需核对', key, sentinel.sum(), '发现疑似缺失码或特殊编码', '核对编码字典；这些值尚未被修改')
         if valid.size and valid.nunique() == 1:
-            add('CONSTANT_COLUMN', '提示', key, valid.size, '有效记录仅有一个取值', '可作为描述信息；不能直接估计变量效应')
+            add('CONSTANT_COLUMN', '提示', key, valid.size, '有效记录仅有一个取值', '请给出处置意见；可仅描述或明确排除',
+                value_summary(valid, private=bool(PRIVATE.search(key) or DATE.search(key))))
         if PRIVATE.search(key):
-            add('IDENTIFIER', '隐私', key, n, '经用户授权，仅用于辅助核查', '不导出标识值，不进入回归')
+            add('IDENTIFIER', '隐私', key, n, '经用户授权，仅用于辅助核查', '用户确认用途；不导出标识值，不进入回归',
+                dict(total_n=n, missing_n=m, unique_n=int(valid.nunique()), values_redacted=True))
             if key in support_variables:
                 repeated = int(valid.duplicated(keep=False).sum())
                 if repeated:
-                    add('REPEATED_IDENTIFIER', '需核对', key, repeated, '授权标识字段存在重复值', '核对重复患者或合法多访视，不能自动去重')
+                    add('REPEATED_IDENTIFIER', '需核对', key, repeated, '授权标识字段存在重复值', '用户核对重复患者或合法多访视并提供意见，不自动去重',
+                        dict(repeated_records_n=repeated, repeated_groups_n=int(valid[valid.duplicated(keep=False)].nunique()),
+                             values_redacted=True))
             continue
         if DATE.search(key):
             continue
         nums = profile['numeric'][~null]
         fraction = float(nums.notna().mean()) if len(valid) else 0
-        if 0.15 < fraction < 0.95 and len(valid) >= 5:
-            add('MIXED_TYPE', '需核对', key, nums.isna().sum(), '数字与文字/编码混杂', '确认字段类型、单位和编码，不自动重编码')
+        if nums.notna().any() and nums.isna().any():
+            add('MIXED_TYPE', '需核对', key, nums.isna().sum(), '数字与文字/编码混杂', '查看具体混杂形式及频数，由用户给出类型、映射或处理规则',
+                mixed_details(valid, nums))
         if fraction >= 0.95 and len(valid):
             x = nums.dropna().astype(float)
+            nonfinite = ~np.isfinite(x)
+            if nonfinite.any():
+                add('NONFINITE_VALUES', '需核对', key, nonfinite.sum(), '存在正负无穷等非有限数值',
+                    '查看具体取值，由用户核对来源并指定处理规则', value_summary(x[nonfinite]))
+                x = x[~nonfinite]
             if re.search(r'年龄|^age$|身高|^height$|体重|^weight$|^bmi$', key, re.I):
                 negative = int((x < 0).sum())
                 if negative:
-                    add('NEGATIVE_MEASUREMENT', '需核对', key, negative, '年龄或人体测量出现负数', '核对录入、单位及医学含义')
+                    add('NEGATIVE_MEASUREMENT', '需核对', key, negative, '年龄或人体测量出现负数', '列出负值及频数，由用户提供核实结果与处理意见',
+                        value_summary(x[x < 0]))
             if len(x) >= 8 and x.nunique() > 5:
                 q1, q3 = x.quantile([0.25, 0.75])
                 iqr = q3 - q1
                 extreme = int(((x < q1 - 3 * iqr) | (x > q3 + 3 * iqr)).sum()) if iqr > 0 else 0
                 if extreme:
-                    add('EXTREME_IQR', '提示', key, extreme, '超出 Q1-3*IQR 或 Q3+3*IQR，仅为极端值线索', '核对单位/录入；真实临床极端值应保留')
+                    flagged = x[(x < q1 - 3*iqr) | (x > q3 + 3*iqr)]
+                    add('EXTREME_IQR', '提示', key, extreme, '超出 Q1-3*IQR 或 Q3+3*IQR，仅为极端值线索', '查看阈值、范围及极端值，由用户确认保留、核对或具体处理规则',
+                        dict(q1=float(q1), q3=float(q3), iqr=float(iqr),
+                             lower_bound=float(q1-3*iqr), upper_bound=float(q3+3*iqr),
+                             min=float(x.min()), max=float(x.max()), numeric_n=len(x),
+                             flagged_values=value_summary(flagged)))
     return pd.DataFrame(issues, columns=ISSUE_COLUMNS)
 
 
@@ -248,16 +262,19 @@ def selection_template(selection, identity, research=None):
                 variables=selection[VARIABLE_DECISION_COLUMNS].to_dict('records'))
 
 
-def quality_template(dec, scope, issues):
-    return dict(schema_version=VERSION, stage='data_quality', status='draft',
+def quality_template(dec, scope, issues, frame=None):
+    rows = issues[ISSUE_DECISION_COLUMNS].to_dict('records')
+    detailed = review_tables(frame, dec) if frame is not None else dict(
+        review_version=REVIEW_VERSION, missing_decisions=[], missing_group_feedback=[])
+    return dict(schema_version=VERSION, stage='data_quality', status='draft', **detailed,
                 source_sha256=dec['source_sha256'], sheet=dec['sheet'],
                 selection_fingerprint=selection_fingerprint(dec), outcome=dec['outcome'],
-                scope_variables=scope, issues=issues[ISSUE_DECISION_COLUMNS].to_dict('records'), notes='',
+                scope_variables=scope, issues=rows, notes='',
                 statistical_plan_confirmed=False)
 
 
 def validate_quality(review, template):
-    errors = []
+    errors = validate_detailed_review(review, template)
     for key in ('schema_version', 'stage', 'source_sha256', 'sheet', 'selection_fingerprint',
                 'outcome', 'scope_variables'):
         if review.get(key) != template[key]:
@@ -279,19 +296,21 @@ def validate_quality(review, template):
         action = row.get('user_action')
         if action not in ISSUE_ACTIONS[1:]:
             errors.append(f'{row.get("issue_id")} 仍未选择有效处理方式')
-        if isinstance(action, str) and action in REASON_ACTIONS and not str(row.get('user_reason') or '').strip():
-            errors.append(f'{row.get("issue_id")} 修改/排除决定必须说明理由及具体规则')
+        if not str(row.get('user_reason') or '').strip():
+            errors.append(f'{row.get("issue_id")} 须填写用户处理意见、理由；修改/排除还须具体规则')
     return errors
 
 
 def write_html(payload, target):
+    if payload.get('decision', {}).get('stage') == 'data_quality':
+        payload = dict(payload, missing_groups=missing_review_groups(payload['decision'].get('missing_decisions', [])))
     safe = json.dumps(payload, ensure_ascii=False, default=str).replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026')
     template = Path(__file__).resolve().parents[1] / 'assets' / 'review_workflow.html'
     Path(target).write_text(template.read_text(encoding='utf-8').replace('__REVIEW_DATA__', safe), encoding='utf-8')
 
 
 def missingness_table(df, outcome):
-    """Observed missingness only; suspected sentinel codes remain untouched."""
+    """Count actual blanks only; literal codes remain untouched."""
     y = df[outcome].astype('string').str.strip()
     groups = [('overall', pd.Series(True, index=df.index))]
     levels = sorted(y.dropna().unique().tolist())
@@ -305,8 +324,8 @@ def missingness_table(df, outcome):
         for group, mask in groups:
             values = df.loc[mask, name]
             rows.append(dict(variable=name, group=group, n=len(values),
-                             missing=int(values.isna().sum()),
-                             missing_pct=round(100 * values.isna().mean(), 2) if len(values) else None))
+                             missing=int(missing_mask(values).sum()),
+                             missing_pct=round(100 * missing_mask(values).mean(), 2) if len(values) else None))
     return pd.DataFrame(rows)
 
 
@@ -314,19 +333,25 @@ def processing_template(dec, identity):
     predictors = [row['variable'] for row in dec['variables'] if row['user_selection'] == '纳入']
     return dict(schema_version=WORKFLOW_VERSION, stage='preprocessing', status='draft', **identity,
                 selection_fingerprint=selection_fingerprint(dec), quality_fingerprint='',
-                positive_value=dec.get('positive_value', ''), missing_strategy='complete_case',
+                positive_value=dec.get('positive_value', ''), missing_strategy='',
                 strip_whitespace=True, operations=[], postprocessing_acceptances=[],
                 variables=[dict(name=name, type='', reference=None, unit='', unit_step=1)
                            for name in [dec['outcome']] + predictors], notes='')
 
 
-def validation_result(out, errors, stage):
+def validation_result(out, errors, stage, review=None):
+    specialized = [row for row in (review or {}).get('missing_decisions', [])
+                   if row.get('user_choice') in {'multiple_imputation', 'recover_source', 'structural_review'}]
     result = dict(valid=not errors, errors=errors, stage=stage,
                   phase_number=3 if stage == 'data_quality' else 2,
-                  status='blocked' if errors else 'awaiting_preprocessing',
-                  formal_analysis_authorized=False, blocking_reasons=errors,
-                  next_action='修正决策后重新验证' if errors else '阶段3尚未完成：确认类型和处理规则，执行修复并复核',
-                  required_inputs=['corrected_decisions'] if errors else ['processing_plan.json'])
+                  status='blocked' if errors else 'awaiting_specialized_missing_plan' if specialized else 'awaiting_preprocessing',
+                  formal_analysis_authorized=False,
+                  blocking_reasons=errors or [f'{row["variable"]}: {row["user_choice"]} 尚待专项实现/核实' for row in specialized],
+                  next_action=('修正决策后重新验证' if errors else
+                               '记录用户选择，完成专项缺失方案；不得改用完整案例' if specialized else
+                               '阶段3尚未完成：确认类型和处理规则，执行修复并复核'),
+                  required_inputs=['corrected_decisions'] if errors else
+                                  ['specialized_missing_plan'] if specialized else ['processing_plan.json'])
     emit_summary(out, 'review_validation.json', result)
     if errors:
         raise SystemExit(2)
@@ -403,13 +428,13 @@ def main(argv=None):
     selected = selected.loc[:, scope]
     detail_rows = [] if not args.validate_decisions else None
     issues = scan(selected, dec.get('support_variables', []), inventory_rows=detail_rows)
-    template = quality_template(dec, scope, issues)
+    template = quality_template(dec, scope, issues, selected)
     if args.validate_decisions:
         quality = load_json(args.validate_decisions)
         errors = validate_quality(quality, template)
         if not errors:
             save_json(out / 'quality_binding.json', {'quality_fingerprint': fingerprint(quality)})
-        validation_result(out, errors, 'data_quality')
+        validation_result(out, errors, 'data_quality', quality)
         return
     detail = pd.DataFrame(detail_rows)
     choices = {row['variable']: row['user_selection'] for row in dec['variables']}
@@ -425,13 +450,16 @@ def main(argv=None):
     pd.DataFrame([dict(variable=name, review_role=roles.get(name, 'not_reviewed')) for name in columns]
                  ).to_csv(out / 'review_scope.csv', index=False, encoding='utf-8-sig')
     save_json(out / 'clinical_review_decisions.template.json', template)
-    write_html(dict(decision=template, issues=issues.to_dict('records'),
-                    actions=ISSUE_ACTIONS), out / 'interactive_data_quality.html')
+    write_html(dict(decision=template, issues=issues.to_dict('records'), actions=ISSUE_ACTIONS,
+                    missingness=missingness_table(selected, dec['outcome']).to_dict('records'),
+                    missing_options=MISSING_OPTIONS), out / 'interactive_data_quality.html')
     emit_summary(out, 'data_quality_summary.json', dict(**identity, stage='data_quality', rows=len(selected),
-              phase_number=3,
+              phase_number=3, review_version=REVIEW_VERSION,
               row_count_status='confirmed_after_selected_read', read_scope='selected_columns_only',
               selection_fingerprint=selection_fingerprint(dec), outcome=dec['outcome'],
               reviewed_columns=len(scope), role_counts=dict(Counter(detail['review_role'].tolist())),
+              missing_group_counts={group['key']: len(group['variables'])
+                                    for group in missing_review_groups(template['missing_decisions'])},
               excluded_not_reviewed_count=len(columns)-len(scope),
               excluded_not_reviewed=[name for name in columns if name not in scope],
               issue_count=len(issues), issue_counts=dict(Counter(issues['severity'].tolist())),

@@ -40,7 +40,7 @@ def infer_domain(name):
 def column_profile(series):
     """One per-column conversion, reusable by inventory and scoped QA."""
     text=series.astype('string').str.strip()
-    observed=text.notna() & ~text.isin(['','NA','N/A','null','NULL'])
+    observed=text.notna() & text.ne('')
     return dict(text=text, lower=text.str.lower(), values=text[observed],
                 numeric=pd.to_numeric(text, errors='coerce'))
 

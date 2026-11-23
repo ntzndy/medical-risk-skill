@@ -51,22 +51,25 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.scope = workflow.review_scope(self.selection, list(self.frame.columns))
         source_frame = read_table(self.source)
         issues = workflow.scan(source_frame[self.scope])
-        self.quality = workflow.quality_template(self.selection, self.scope, issues)
+        self.quality = workflow.quality_template(self.selection, self.scope, issues, source_frame[self.scope])
         self.quality['status'] = 'reviewed'
         operations = []
         for issue in self.quality['issues']:
             issue.update(user_action='保留并记录', user_reason='Synthetic retained clue')
-            if issue['rule'] == 'SENTINEL_VALUE':
-                issue.update(user_action='设为缺失（须说明规则）', user_reason='Synthetic code 999 is missing')
-                operations.append(dict(action='set_missing', variable='age', values=['999'],
-                                       issue_ids=[issue['issue_id']], reason='Confirmed synthetic missing code'))
             if issue['rule'] == 'NEGATIVE_MEASUREMENT':
                 issue.update(user_action='修正编码/单位（须提供映射）', user_reason='Synthetic source verified: -1 means 45')
                 operations.append(dict(action='map_values', variable='age', mapping={'-1': '45'},
                                        issue_ids=[issue['issue_id']], reason='Confirmed synthetic source correction'))
+        operations.append(dict(action='set_missing', variable='age', values=['999'], issue_ids=[],
+                               reason='Synthetic user explicitly confirmed this age code as missing'))
+        for row in self.quality['missing_decisions']:
+            row.update(user_choice='complete_case', user_reason='Synthetic confirmed per-model complete cases')
         self.plan = workflow.processing_template(self.selection, self.identity)
-        self.plan.update(status='confirmed', quality_fingerprint=workflow.fingerprint(self.quality),
+        self.plan.update(status='confirmed', missing_strategy='complete_case', quality_fingerprint=workflow.fingerprint(self.quality),
                          operations=operations,
+                         postprocessing_missing_decisions=[
+                             dict(variable='age', missing_n=1, user_choice='complete_case',
+                                  reason='Synthetic user reviewed the new missing value after explicit conversion')],
                          variables=[dict(name='outcome', type='binary', reference='0', unit='', unit_step=1),
                                     dict(name='age', type='continuous', reference=None, unit='years', unit_step=10),
                                     dict(name='sex', type='binary', reference='F', unit='', unit_step=1)])
@@ -136,7 +139,7 @@ class AnalysisWorkflowTests(unittest.TestCase):
             self.process()
 
     def test_unmatched_rule_does_not_claim_a_fix(self):
-        self.plan['operations'][0]['values'] = ['NONEXISTENT']
+        self.plan['operations'][0]['mapping'] = {'NONEXISTENT': '45'}
         with self.assertRaises(ValueError):
             self.process()
 
@@ -180,7 +183,8 @@ class AnalysisWorkflowTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             processing.load_preprocessing(self.out)
         self.plan['postprocessing_acceptances'] = [
-            dict(rule='NEGATIVE_MEASUREMENT', variable='age', reason='Synthetic test-only retained clue after review')
+            dict(rule='NEGATIVE_MEASUREMENT', variable='age', reason='Synthetic test-only retained clue after review'),
+            dict(rule='EXTREME_IQR', variable='age', reason='Synthetic changed extreme-value evidence also reviewed'),
         ]
         manifest = self.process()
         self.assertEqual(manifest['status'], 'completed')
@@ -292,8 +296,9 @@ class AnalysisWorkflowTests(unittest.TestCase):
         self.assertEqual(read['code'].iloc[:3].tolist(), ['NA', 'null', '999'])
         self.assertTrue(pd.isna(read['code'].iloc[3]))
         issues = workflow.scan(read)
-        sentinel = issues.loc[issues.rule == 'SENTINEL_VALUE'].iloc[0]
-        self.assertEqual(sentinel['affected_n'], 3)
+        self.assertNotIn('SENTINEL_VALUE', set(issues.rule))
+        self.assertIn('MIXED_TYPE', set(issues.rule))
+        self.assertEqual(int(workflow.missingness_table(read, 'code').query("group == 'overall'").iloc[0]['missing']), 1)
 
     def test_continuous_effect_matches_confirmed_comparison_scale(self):
         frame = self.frame[['age', 'outcome']].iloc[2:].copy()

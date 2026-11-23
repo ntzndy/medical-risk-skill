@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from profile_data import read_table
+from quality_review import missing_mask
 from review_workflow import (
     WORKFLOW_VERSION, emit_summary, fingerprint, load_json, missingness_table,
     quality_template, review_scope, save_json, scan, selection_fingerprint,
@@ -58,7 +59,11 @@ def validate_processing(plan, selection, quality, identity):
     if plan.get('quality_fingerprint') != fingerprint(quality):
         errors.append('处理方案须绑定当前已审核质量决定')
     if plan.get('missing_strategy') != 'complete_case' or plan.get('strip_whitespace') is not True:
-        errors.append('本版只支持完整案例，不插补；须确认去除字符串首尾空格的标准化')
+        errors.append('须根据用户缺失决定明确执行策略；当前引擎仅执行完整案例。多重插补须另行实现，不能静默替代；须确认去首尾空格')
+    for row in quality.get('missing_decisions', []):
+        choice = row.get('user_choice')
+        if choice in {'multiple_imputation', 'recover_source', 'structural_review'}:
+            errors.append(f'{row["variable"]}: 用户选择 {choice}，须完成对应专项方案；当前不能执行完整案例或进入模型')
     if any(row.get('user_action') == '核对原始病历/数据来源' for row in quality['issues']):
         errors.append('仍有待溯源项目；获得反馈并更新审核后才能结束阶段3')
     operations = plan.get('operations')
@@ -95,6 +100,17 @@ def validate_processing(plan, selection, quality, identity):
         if issue['user_action'] in ACTION_OPERATIONS and key not in covered:
             errors.append(f'{key}: 只记录了修改/排除决定，尚未提供可执行规则')
     return errors
+
+
+def reviewed_operations(plan, quality):
+    """Execute confirmed rules and predictor exclusions, never infer missing codes."""
+    operations = list(plan['operations'])
+    excluded = {op['variable'] for op in operations if op['action'] == 'exclude_variable'}
+    for row in quality.get('missing_decisions', []):
+        if row['user_choice'] == 'exclude_variable' and row['variable'] not in excluded:
+            operations.append(dict(action='exclude_variable', variable=row['variable'],
+                                   reason=row['user_reason'], issue_ids=[]))
+    return operations
 
 
 def apply_operations(frame, operations, outcome):
@@ -262,11 +278,14 @@ def main(argv=None):
     selected.columns = selected.columns.map(str)
     selected = selected.loc[:, scope]
     issues = scan(selected, selection.get('support_variables', []))
-    require_valid(validate_quality(quality, quality_template(selection, scope, issues)))
+    require_valid(validate_quality(quality, quality_template(selection, scope, issues, selected)))
     require_valid(validate_processing(plan, selection, quality, identity))
     model_names = [name for name in scope if name not in selection.get('support_variables', [])]
     original = selected.loc[:, model_names]
-    processed, log = apply_operations(original, plan['operations'], selection['outcome'])
+    operations = reviewed_operations(plan, quality)
+    # Auxiliary fields never drive cleaning or row deletion.
+    operations = [op for op in operations if op['variable'] not in selection.get('support_variables', [])]
+    processed, log = apply_operations(original, operations, selection['outcome'])
     processed, dictionary = apply_types(processed, plan.get('variables'), selection['outcome'], plan.get('positive_value'))
     if not len(processed):
         raise ValueError('处理后没有数据，不能进入模型确认')
@@ -299,9 +318,26 @@ def main(argv=None):
     accepted = {(row.get('rule'), row.get('variable')) for row in acceptances}
     retained = {(row['rule'], row['variable']): row['affected_n'] for row in quality['issues']
                 if row['user_action'] in {'保留并记录', '不适用/无需处理'}}
+    previous_evidence = {(row['rule'], row['variable']): row['details'] for row in issues.to_dict('records')}
     pending = [row for row in residual.to_dict('records')
                if (row['rule'], row['variable']) not in accepted
-               and row['affected_n'] > retained.get((row['rule'], row['variable']), -1)]
+               and (row['affected_n'] > retained.get((row['rule'], row['variable']), -1)
+                    or row['details'] != previous_evidence.get((row['rule'], row['variable'])))]
+    previous_missing = {row['variable']: row['observed_missing_n']
+                        for row in quality.get('missing_decisions', [])}
+    followup = plan.get('postprocessing_missing_decisions', [])
+    if not isinstance(followup, list) or any(not isinstance(row, dict) for row in followup):
+        raise ValueError('postprocessing_missing_decisions 须为逐变量缺失处理决定列表')
+    if len({row.get('variable') for row in followup}) != len(followup):
+        raise ValueError('处理后缺失决定不得重复')
+    for name in processed:
+        count = int(missing_mask(processed[name]).sum())
+        if count > previous_missing.get(name, 0):
+            approved = any(row.get('variable') == name and row.get('missing_n') == count
+                           and row.get('user_choice') == 'complete_case'
+                           and str(row.get('reason') or '').strip() for row in followup)
+            if not approved:
+                pending.append(dict(rule='MISSING_AFTER_PROCESSING', variable=name, affected_n=count))
     confirmations = {}
     inputs = {'research': args.research_question, 'selection': args.selection_decisions,
               'quality': args.quality_decisions, 'processing': args.processing_plan}

@@ -1,4 +1,4 @@
-# 医学危险因素分析 Skill v1.6
+# 医学危险因素分析 Skill v1.7.2
 
 严格逐层推进：**1 读取文件并提问确认目标 → 2 选择变量 → 3 核查并执行确认修复 → 4 确认 Logistic 方案 → 5 分析与解释**。未完成当前阶段不进入下一阶段，一次确认不代表后续授权。
 
@@ -22,7 +22,11 @@ python scripts/review_workflow.py --input data.xlsx --sheet Sheet1 --outdir outp
 ```bash
 python scripts/review_workflow.py --input data.xlsx --sheet Sheet1 --outdir output --research-question output/research_question.json --selection-decisions output/variable_selection_decisions.json
 ```
-生成实际缺失及按结局分布、异常线索、类型候选、处理模板和 `interactive_data_quality.html`。未选字段不核查。用户审核并导出 `clinical_review_decisions.json`；继续明确类型、参考组、阳性编码、缺失策略和具体修复规则，代理记录为 `processing_plan.json`。规则结构见 `references/config_schema.md`。
+生成缺失核查、异常具体情况、类型候选、处理模板和 `interactive_data_quality.html`。缺失按 `0%<缺失比例<30%`、`30%≤缺失比例≤50%`、`>50%` 分组，无缺失另列。页面逐变量仅显示“变量名 / 缺失比例 / xx%”，每组列表后提供一个意见框；详细人数和结局分布保留在核查文件中。低组默认拟采用多重插补，用户可填写变量例外；中高组不预设方法，由用户填写整组或逐变量处理意见。恰好30%和50%归入中组。
+
+“提交缺失处理意见”导出 `clinical_review_feedback.json`，仅保存待整理的原文，不执行处理。代理据此整理成逐变量方案、展示并获确认后，才能完成质量审核。可选完整案例、排除解释变量、MI、补录及专项处理；MI尚无执行引擎，默认或选择MI后仍须暂停，不能替换为完整案例。
+
+缺失不在其他异常中重复，也不再自动识别或单列疑似缺失码；非空编码保留原值，参加常规类型和极端值核查。混杂显示具体形式及频数，极端值显示阈值、范围和取值，其他问题也须用户意见与依据。未选字段不核查。详细方法及文献见 `references/quality_review.md`，决定结构见 `references/config_schema.md`。
 
 可用 `--validate-decisions output/clinical_review_decisions.json` 在上一命令上验证审核完整性，获取当前 `quality_fingerprint`；验证通过不等于修复完成。随后执行：
 ```bash

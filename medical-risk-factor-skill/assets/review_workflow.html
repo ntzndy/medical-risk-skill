@@ -9,6 +9,9 @@
 *{box-sizing:border-box}body{font:14px system-ui,"Microsoft YaHei",sans-serif;margin:0;color:#242e29;background:#fff;letter-spacing:0}
 main{max-width:1440px;margin:auto;padding:24px}header{border-bottom:3px solid #277650;padding-bottom:16px}
 h1{font-size:23px;margin:0 0 12px}h2{font-size:18px;margin:24px 0 12px}p{line-height:1.7}
+h3{font-size:16px;margin:12px 0}.missing-group{border-top:1px solid #cbd5ce;padding-top:8px;margin-top:16px}
+.missing-list{list-style:none;margin:12px 0;padding:0}.missing-row{border-bottom:1px solid #d8dfd9;padding:8px 0;line-height:1.7;overflow-wrap:anywhere}.missing-pct{white-space:nowrap}
+.group-feedback{display:block;margin:16px 0;font-weight:600}.group-feedback textarea{display:block;margin-top:8px;min-height:112px;font-weight:400}
 .muted{color:#59655e}.scope{overflow-wrap:anywhere}.bar{padding:12px 0;background:#f2f5f2}
 .fields{display:flex;flex-wrap:wrap;gap:16px;padding:16px 0}.field{display:flex;flex-direction:column;gap:7px;max-width:100%;width:320px}
 select,input,textarea,button{font:inherit;max-width:100%}select,input[type=text],textarea{border:1px solid #9da9a0;border-radius:4px;padding:8px;background:#fff;color:inherit}
@@ -20,8 +23,19 @@ button:hover{background:#eaf1ec}button:focus-visible,input:focus-visible,textare
 th,td{border-bottom:1px solid #d8dfd9;padding:10px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 th{background:#edf2ee;position:sticky;top:0;font-weight:600}td label{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;margin-right:10px}
 td textarea{min-height:46px}td select{width:100%}.tag{font-size:12px;color:#215c40}.warning{color:#9b3c22}
+.evidence{margin-top:8px;line-height:1.6;color:#384d44}.evidence div{margin-top:4px}.basis{font-size:13px;color:#59655e;line-height:1.6;margin-top:8px}
+.method-reference{border-left:3px solid #ad6a25;padding-left:12px}
 footer{border-top:2px solid #277650;margin-top:24px;padding-top:16px}footer .commands{margin-top:12px}#status{min-height:24px;overflow-wrap:anywhere}
 [hidden]{display:none!important}@media(max-width:600px){main{padding:16px 12px}h1{font-size:21px}.field{width:100%}.commands button{flex:1 1 150px}}
+@media(max-width:600px){
+  #quality .scroll{overflow:visible;max-height:none}
+  #quality table{min-width:0;table-layout:auto}
+  #quality thead,#quality colgroup{display:none}
+  #quality table,#quality tbody,#quality tr,#quality td{display:block;width:100%}
+  #quality tr{border-bottom:1px solid #cbd5ce;padding:12px 0}
+  #quality td{border:0;padding:6px 0}
+  #quality td::before{content:attr(data-label);display:block;font-weight:600;font-size:12px;color:#59655e;margin-bottom:5px}
+}
 </style>
 </head>
 <body><main>
@@ -44,6 +58,13 @@ footer{border-top:2px solid #277650;margin-top:24px;padding-top:16px}footer .com
 <section id="quality" hidden>
 <h2>本轮核查范围</h2><p id="scope" class="scope"></p>
 <p class="muted">未选字段未参与核查。下列项目只是待核对线索；审核不会自动修改原始值、填补缺失或删除记录。</p>
+<h2>逐变量缺失情况与处理决定</h2>
+<div id="missing"></div>
+<div class="commands"><button id="submit-missing" type="button">提交缺失处理意见</button></div>
+<p id="missing-status" role="status" class="warning"></p>
+<details class="method-reference"><summary>缺失处理的统计学依据</summary><div id="method-bases"></div>
+<p class="basis">[S1] Sterne等，BMJ 2009，doi:10.1136/bmj.b2393。[S2] Lee等，TARMOS，J Clin Epidemiol 2021，doi:10.1016/j.jclinepi.2021.01.008。[S3] White等，Stat Med 2011，doi:10.1002/sim.4067。缺失率不能单独决定方法；不默认均值、中位数、众数单次填补或缺失指示法。</p></details>
+<h2>其他异常与具体情况</h2>
 <div class="scroll"><table>
 <colgroup><col style="width:11%"><col style="width:14%"><col style="width:25%"><col style="width:20%"><col style="width:17%"><col style="width:13%"></colgroup>
 <thead><tr><th>编号 / 级别</th><th>字段</th><th>问题 / 影响数</th><th>建议</th><th>处理方式</th><th>理由 / 规则</th></tr></thead>
@@ -64,8 +85,23 @@ const issues=data.issues||decision.issues;
 const findVariable=name=>decision.variables.find(row=>row.variable===name);
 const findIssue=id=>decision.issues.find(row=>row.issue_id===id);
 const $=id=>document.getElementById(id);
+$('notes').value=decision.notes||'';
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const makeOption=(value,label)=>{const option=document.createElement('option');option.value=value;option.textContent=label;return option};
+function evidence(r){
+  let d={};try{d=JSON.parse(r.details||'{}')}catch{return ''}
+  const values=x=>x?.redacted?'标识值不导出':(x?.values||[]).map(v=>`${esc(v.value)} × ${v.count}`).join('；')+(x?.omitted_distinct_n?`；另有 ${x.omitted_distinct_n} 种取值`:'');
+  const parts=[];
+  if(d.q1!==undefined)parts.push(`Q1=${d.q1}；Q3=${d.q3}；IQR=${d.iqr}`,`下界=${d.lower_bound}；上界=${d.upper_bound}`,`实际范围=${d.min} 至 ${d.max}；数值记录=${d.numeric_n}`,`极端取值：${values(d.flagged_values)}`);
+  else if(d.forms)parts.push(`数字 ${d.numeric_n} 条；非数字 ${d.nonnumeric_n} 条`,...Object.entries(d.forms).map(([k,v])=>`${esc(k)}：${v}`),`非数字形式：${values(d.nonnumeric_values)}`);
+  else if(d.values)parts.push(`具体取值：${values(d)}`);
+  else{
+    const labels={total_n:'总记录',missing_n:'实际空值',missing_pct:'缺失比例(%)',unique_n:'不同标识数量',repeated_records_n:'重复组涉及记录',repeated_groups_n:'重复组数量'};
+    Object.entries(labels).forEach(([key,label])=>{if(d[key]!==undefined)parts.push(`${label}：${d[key]}`)});
+    if(d.values_redacted)parts.push('标识值已隐藏');
+  }
+  return `<div class="evidence">${parts.map(p=>`<div>${p}</div>`).join('')}</div>`;
+}
 $('title').textContent=isSelection?'阶段 2/5：确认分析变量':'阶段 3/5：已选变量质量审核';
 document.title=$('title').textContent;
 $(isSelection?'selection':'quality').hidden=false;
@@ -97,16 +133,56 @@ if(isSelection){
   });
 }else{
   $('scope').textContent=`结局：${decision.outcome}；核查字段：${decision.scope_variables.join('、')}`;
+  (data.missing_options||[]).forEach(option=>{
+    const p=document.createElement('p');p.className='basis';p.textContent=`${option.label}：${option.basis}`;$('method-bases').append(p);
+  });
+  const missingRows=new Map((decision.missing_decisions||[]).map(r=>[r.variable,r]));
+  (data.missing_groups||[]).forEach(group=>{
+    const entries=group.variables.map(name=>missingRows.get(name));
+    const section=document.createElement('section');
+    section.className='missing-group';section.dataset.missingGroup=group.key;
+    section.innerHTML=`<h3>${esc(group.label)}（${entries.length}个变量）</h3>`;
+    const list=document.createElement('ul');list.className='missing-list';
+    entries.forEach(r=>{
+      const row=document.createElement('li');row.className='missing-row';row.dataset.variable=r.variable;
+      const name=document.createElement('span');name.className='missing-name';
+      name.textContent=r.variable.replace(/\s+/g,' ').trim();
+      const pct=document.createElement('span');pct.className='missing-pct';
+      pct.textContent=r.missing_pct==null?'不可计算':`${r.missing_pct}%`;
+      row.append(name,document.createTextNode(' / 缺失比例 / '),pct);list.append(row);
+    });
+    section.append(list);
+    const feedback=(decision.missing_group_feedback||[]).find(r=>r.group_key===group.key);
+    if(feedback){
+      const label=document.createElement('label');label.className='group-feedback';
+      const low=group.key==='below_30';
+      label.textContent=low?'需要自行改动的变量及处理意见（可留空，沿用默认方案）':'本组变量的处理意见';
+      const input=document.createElement('textarea');input.id=`group_feedback_${group.key}`;
+      input.setAttribute('aria-label',`${group.label} 的处理意见`);
+      input.placeholder=low?'填写变量名称、希望改用的处理方式和原因；未另作说明的变量沿用默认多重插补方案。':'填写本组统一处理方式和原因，或逐项填写变量名称及处理意见。';
+      input.value=feedback.user_text;
+      input.addEventListener('input',()=>{feedback.user_text=input.value;update()});
+      label.append(input);section.append(label);
+    }
+    $('missing').append(section);
+  });
+  $('submit-missing').hidden=!(decision.missing_group_feedback||[]).length;
   issues.forEach(r=>{
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${esc(r.issue_id)}<br>${esc(r.severity)}</td><td>${esc(r.variable)}</td><td>${esc(r.description)} (${r.affected_n})</td><td>${esc(r.suggestion)}</td><td><select aria-label="问题 ${esc(r.issue_id)} 的处理方法"></select></td><td><textarea aria-label="问题 ${esc(r.issue_id)} 的处理理由"></textarea></td>`;
+    tr.innerHTML=`<td>${esc(r.issue_id)}<br>${esc(r.severity)}</td><td>${esc(r.variable)}</td><td>${esc(r.description)} (${r.affected_n})${evidence(r)}</td><td>${esc(r.suggestion)}</td><td><select aria-label="问题 ${esc(r.issue_id)} 的处理方法"></select></td><td><textarea aria-label="问题 ${esc(r.issue_id)} 的处理理由"></textarea></td>`;
     const select=tr.querySelector('select');
     data.actions.forEach(action=>select.append(makeOption(action,action)));
+    select.value=findIssue(r.issue_id).user_action;
     select.addEventListener('change',event=>{findIssue(r.issue_id).user_action=event.target.value;update()});
+    tr.querySelector('textarea').value=findIssue(r.issue_id).user_reason||'';
     tr.querySelector('textarea').addEventListener('input',event=>findIssue(r.issue_id).user_reason=event.target.value);
     $('issues').append(tr);
   });
   $('noissues').hidden=issues.length!==0;
+  document.querySelectorAll('#quality table').forEach(table=>{
+    const labels=[...table.querySelectorAll('thead th')].map(th=>th.textContent);
+    table.querySelectorAll('tbody tr').forEach(tr=>[...tr.cells].forEach((cell,i)=>cell.dataset.label=labels[i]));
+  });
 }
 function update(){
   if(isSelection){
@@ -114,10 +190,12 @@ function update(){
     $('stats').textContent=`全部字段 ${variables.length}；已选择 ${variables.length-pending}；未选择 ${pending}。等待变量确认，未进行质量核查。`;
   }else{
     const pending=decision.issues.filter(r=>r.user_action==='待确认').length;
-    $('stats').textContent=`核查字段 ${decision.scope_variables.length}；待核对线索 ${issues.length}；待处置 ${pending}。`;
+    const missing=(decision.missing_decisions||[]).filter(r=>!r.user_choice).length;
+    const feedback=(decision.missing_group_feedback||[]).filter(r=>r.user_text!==r.resolved_text).length;
+    $('stats').textContent=`核查字段 ${decision.scope_variables.length}；异常 ${issues.length}；待处置 ${pending}；缺失方案待定 ${missing}；分组意见待整理 ${feedback}。`;
   }
 }
-function exportDecision(strict){
+function exportDecision(strict,missingOnly=false){
   const result=JSON.parse(JSON.stringify(decision)),errors=[];
   result.notes=$('notes').value;
   if(isSelection){
@@ -135,22 +213,41 @@ function exportDecision(strict){
     if(result.support_variables.length&&!result.support_purpose)errors.push('须填写辅助核查用途');
     result.status=strict?'confirmed':'draft';
   }else{
+    const feedback=result.missing_group_feedback||[];
+    if(missingOnly){
+      feedback.filter(r=>r.group_key!=='below_30').forEach(r=>{
+        const pending=result.missing_decisions.some(v=>r.variables.includes(v.variable)&&!v.user_choice);
+        if(pending&&!r.user_text.trim())errors.push(`${r.label}：请填写本组处理意见`);
+      });
+    }else{
     if(result.issues.some(r=>!data.actions.slice(1).includes(r.user_action)))errors.push('仍有异常未决定');
-    if(result.issues.some(r=>data.actions.slice(3,7).includes(r.user_action)&&!String(r.user_reason||'').trim()))errors.push('修改或排除必须填写理由及具体规则');
-    result.status=strict?'reviewed':'draft';
+    if(result.issues.some(r=>!String(r.user_reason||'').trim()))errors.push('须填写用户处理理由；修改或排除还须具体规则');
+    feedback.forEach(r=>{
+      if(r.user_text!==r.resolved_text)errors.push(`${r.label}：分组意见尚待整理并确认为逐变量方案，请先提交缺失处理意见`);
+    });
+    (result.missing_decisions||[]).forEach(r=>{
+      const options=['no_missing',...(data.missing_options||[]).map(o=>o.value)];
+      if(!options.includes(r.user_choice))errors.push(`${r.variable}：缺失处理方式尚未决定`);
+      if(r.observed_missing_n&&r.user_choice==='no_missing')errors.push(`${r.variable}：已确认存在缺失，不能选择无缺失`);
+      if(r.user_choice!=='no_missing'&&!String(r.user_reason||'').trim())errors.push(`${r.variable}：须给出缺失处理依据`);
+      if(r.role==='outcome'&&r.user_choice==='exclude_variable')errors.push('不能直接排除结局');
+    });
+    }
+    result.status=missingOnly?'missing_feedback_submitted':strict?'reviewed':'draft';
     result.statistical_plan_confirmed=false;
   }
-  if(strict&&errors.length){$('status').textContent=errors.join('；');return}
+  if(strict&&errors.length){$(missingOnly?'missing-status':'status').textContent=errors.join('；');return}
   const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));
   const anchor=document.createElement('a');anchor.href=url;
-  anchor.download=isSelection?'variable_selection_decisions.json':'clinical_review_decisions.json';
+  anchor.download=isSelection?'variable_selection_decisions.json':missingOnly?'clinical_review_feedback.json':'clinical_review_decisions.json';
   anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
-  $('status').textContent=strict?(isSelection?'阶段2决定已导出；下一步仅核查选定范围。':'阶段3审核已导出；仍须确认并执行数据处理，尚未进入模型确认。'):'已导出草稿，尚未确认。';
+  $(missingOnly?'missing-status':'status').textContent=missingOnly?'缺失处理意见已导出，待整理并确认逐变量方案；未插补、未改值、未进入模型。':strict?(isSelection?'阶段2决定已导出；下一步仅核查选定范围。':'阶段3审核已导出；仍须确认并执行数据处理，尚未进入模型确认。'):'已导出草稿，尚未确认。';
 }
+$('submit-missing').addEventListener('click',()=>exportDecision(true,true));
 $('draft').addEventListener('click',()=>exportDecision(false));
 $('confirm').addEventListener('click',()=>exportDecision(true));
-document.addEventListener('input',()=>{$('status').textContent=''});
-document.addEventListener('change',()=>{$('status').textContent=''});
+document.addEventListener('input',()=>{$('status').textContent='';$('missing-status').textContent=''});
+document.addEventListener('change',()=>{$('status').textContent='';$('missing-status').textContent=''});
 update();
 </script>
 </body></html>
